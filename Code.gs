@@ -169,7 +169,7 @@ function main() {
     // 2. 気象庁 JSON を取得
     var data = fetchWeatherJson(CONFIG.AREA_CODE);
 
-    // 3. 天気情報を抽出
+    // 3. 天気情報を抽出（気温のフォールバックは buildWeatherInfo 内で自動処理）
     var weatherInfo = buildWeatherInfo(data);
 
     // 4. Discord 投稿文を作成
@@ -179,6 +179,7 @@ function main() {
     postToDiscord(webhookUrl, message);
 
     // 6. スナップショットを保存（11時・17時の更新確認用）
+    //    buildWeatherInfo 内で気温スナップショットも自動保存される
     saveWeatherSnapshot(weatherInfo);
 
     console.log('=== 天気予報 Discord 通知（通常投稿）完了 ===');
@@ -209,7 +210,405 @@ function main() {
 function testPost() {
   console.log('=== テスト投稿 開始（気象庁 JSON を実際に取得します） ===');
   main();
+  console.log('');
+  console.log('テスト投稿の結果はDiscordチャンネルで確認してください。');
+  console.log('気温データの取得状況は上のログで確認できます。');
+  console.log('気温が表示されない場合は debugTemperature() を実行してJSON構造を確認してください。');
   console.log('=== テスト投稿 終了 ===');
+}
+
+
+// ============================================================================
+// 気温スナップショットの確認用
+// ============================================================================
+
+/**
+ * 今日の日付の気温スナップショットが Script Properties に保存されているか確認します。
+ *
+ * 夕方の投稿で気温が表示されない場合、この関数でスナップショットの有無を
+ * 確認してください。スナップショットは朝6時台や11時台の buildWeatherInfo
+ * で自動保存されます。
+ *
+ * Discord への投稿は行いません。
+ * GAS エディタでこの関数を選択して「実行」してください。
+ */
+function debugTemperatureSnapshot() {
+  console.log('=== 気温スナップショット 確認 ===');
+  console.log('');
+
+  var todayDate = getTodayDateJst();
+  var key = 'WEATHER_TEMP_SNAPSHOT_' + todayDate;
+
+  console.log('【検索情報】');
+  console.log('  今日の日付 (JST): ' + todayDate);
+  console.log('  検索キー          : ' + key);
+  console.log('  保存先            : Script Properties');
+  console.log('');
+
+  var props = PropertiesService.getScriptProperties();
+  var allKeys = props.getKeys();
+  var tempSnapshotKeys = [];
+  for (var i = 0; i < allKeys.length; i++) {
+    if (allKeys[i].indexOf('WEATHER_TEMP_SNAPSHOT_') === 0) {
+      tempSnapshotKeys.push(allKeys[i]);
+    }
+  }
+
+  console.log('【Script Properties 内の気温スナップショット一覧】');
+  if (tempSnapshotKeys.length === 0) {
+    console.log('  気温スナップショットは1件も保存されていません。');
+  } else {
+    for (var j = 0; j < tempSnapshotKeys.length; j++) {
+      var raw = props.getProperty(tempSnapshotKeys[j]);
+      var marker = (tempSnapshotKeys[j] === key) ? ' ★今日の日付' : '';
+      if (raw) {
+        try {
+          var parsed = JSON.parse(raw);
+          console.log(
+            '  ' + tempSnapshotKeys[j] + marker + '\n' +
+            '    日付: ' + (parsed.date || '不明') +
+            '  最高: ' + (parsed.maxTemp !== null ? parsed.maxTemp + '℃' : 'null') +
+            '  最低: ' + (parsed.minTemp !== null ? parsed.minTemp + '℃' : 'null') +
+            '  保存時刻: ' + (parsed.savedAt || '不明')
+          );
+        } catch (e) {
+          console.log('  ' + tempSnapshotKeys[j] + '（パースエラー: ' + e.message + '）');
+        }
+      } else {
+        console.log('  ' + tempSnapshotKeys[j] + '（値が空）');
+      }
+    }
+  }
+
+  console.log('');
+  console.log('【判定】');
+  var json = props.getProperty(key);
+  if (!json || json === '') {
+    console.log('  今日の気温スナップショットは保存されていません。');
+    console.log('');
+    console.log('  保存されるタイミング:');
+    console.log('    - testPost() または main() の実行時（朝6時台の通常投稿）');
+    console.log('    - checkUpdate() の実行時（11時台・17時台の更新確認）');
+    console.log('    → buildWeatherInfo() 内で今日の気温がJSONから取得できた場合に自動保存されます');
+    console.log('');
+    console.log('  考えられる原因:');
+    console.log('    - まだ一度も testPost() を実行していない');
+    console.log('    - 前回実行時も JSON に今日の気温がなかった（17時発表のJSONなど）');
+    console.log('    - TEMP_STATION_CODE が誤っている');
+    console.log('');
+    console.log('  対処:');
+    console.log('    - 朝6時台または11時台に testPost() を実行する');
+    console.log('    - または testSaveTemperatureSnapshot() を実行する');
+  } else {
+    try {
+      var data = JSON.parse(json);
+      console.log('  今日の気温スナップショットが存在します。');
+      console.log('    日付     : ' + (data.date || '不明'));
+      console.log('    最高気温 : ' + (data.maxTemp !== null ? data.maxTemp + '℃' : 'null'));
+      console.log('    最低気温 : ' + (data.minTemp !== null ? data.minTemp + '℃' : 'null'));
+      console.log('    保存時刻 : ' + (data.savedAt || '不明'));
+      console.log('');
+      console.log('  → 今日の気温スナップショットは正常に保存されています。');
+      console.log('  → 17時発表などでJSONに今日の気温がない場合、この値が補完に使われます。');
+    } catch (e) {
+      console.log('  今日の気温スナップショットのパースに失敗しました: ' + e.message);
+    }
+  }
+
+  console.log('');
+  console.log('=== 気温スナップショット 確認 終了 ===');
+}
+
+
+// ============================================================================
+// 気温スナップショットの手動保存用
+// ============================================================================
+
+/**
+ * 現在の気象庁JSONから今日の気温を取得し、気温スナップショットを保存します。
+ *
+ * 明日の気温を今日の気温として保存することはありません。
+ * JSONに今日の日付の気温データが含まれている場合のみ保存します。
+ *
+ * 使い方:
+ *   夕方の投稿で気温が表示されない場合、この関数を実行して
+ *   気温スナップショットを作成した後、再度 testPost() を実行してください。
+ *   （通常は朝6時台の testPost() で自動保存されるため、手動実行は不要です）
+ *
+ * Discord への投稿は行いません。
+ * GAS エディタでこの関数を選択して「実行」してください。
+ */
+function testSaveTemperatureSnapshot() {
+  console.log('=== 気温スナップショット 手動保存 ===');
+  console.log('');
+
+  var todayDate = getTodayDateJst();
+  var key = 'WEATHER_TEMP_SNAPSHOT_' + todayDate;
+
+  console.log('今日の日付: ' + todayDate);
+  console.log('保存キー  : ' + key);
+  console.log('');
+
+  // JSON から今日の気温を抽出
+  var data;
+  try {
+    data = fetchWeatherJson(CONFIG.AREA_CODE);
+  } catch (e) {
+    console.error('気象庁 JSON の取得に失敗: ' + e.message);
+    console.log('');
+    console.log('=== 気温スナップショット 手動保存 終了 ===');
+    return;
+  }
+
+  var shortForecast = data[0];
+  if (!shortForecast || !Array.isArray(shortForecast.timeSeries)) {
+    console.error('JSONの構造が想定と異なります。');
+    console.log('');
+    console.log('=== 気温スナップショット 手動保存 終了 ===');
+    return;
+  }
+
+  var timeSeries = shortForecast.timeSeries;
+
+  // timeSeries から気温データを動的検索
+  var temps = extractTemperaturesFromSeries(timeSeries);
+
+  console.log('【抽出結果】');
+  console.log('  maxTemp: ' + (temps.maxTemp !== null ? temps.maxTemp + '℃' : 'null'));
+  console.log('  minTemp: ' + (temps.minTemp !== null ? temps.minTemp + '℃' : 'null'));
+  console.log('');
+
+  // 今日の気温が1つも取れない場合は保存しない
+  if (temps.maxTemp === null && temps.minTemp === null) {
+    console.log('【判定】');
+    console.log('  今日の日付（' + todayDate + '）の気温データがJSONに含まれていません。');
+    console.log('  これは17時発表のJSONでは正常な動作です。');
+    console.log('');
+
+    // 今日以外にどんな日付のデータがあるか確認
+    console.log('【参考】JSON に含まれる日付:');
+    // extractTemperaturesFromSeries のログで表示済みなので、ここでは簡潔に
+    console.log('  上のログを確認してください。timeSeries 内の timeDefines から日付を確認できます。');
+    console.log('');
+
+    console.log('気温スナップショットは保存されませんでした。');
+    console.log('（明日の気温を今日の気温として保存することはありません）');
+    console.log('');
+    console.log('対処: 朝6時台または11時台に testPost() を実行すると、');
+    console.log('      JSONに今日の気温があれば自動でスナップショットが保存されます。');
+  } else {
+    console.log('【判定】');
+    console.log('  今日の気温データがJSONに含まれています。スナップショットを保存します。');
+    console.log('');
+
+    saveTempSnapshot(temps.maxTemp, temps.minTemp);
+
+    console.log('');
+    console.log('保存が完了しました。');
+    console.log('この後 testPost() を実行すると、気温行が表示されるはずです。');
+  }
+
+  console.log('');
+  console.log('=== 気温スナップショット 手動保存 終了 ===');
+}
+
+
+// ============================================================================
+// デバッグ：気温データ取得状況の詳細確認
+// ============================================================================
+
+/**
+ * 気温データの取得状況を詳細にログ出力します。
+ *
+ * 気象庁 JSON の全 timeSeries の構造、TEMP_STATION_CODE に一致する
+ * area の有無、今日の日付のデータの有無、抽出結果をまとめて表示します。
+ * Discord への投稿は行いません。
+ *
+ * 気温が投稿文に表示されない場合の原因調査に使ってください。
+ *
+ * GAS エディタでこの関数を選択して「実行」してください。
+ */
+function debugTemperature() {
+  console.log('=== 気温データ取得状況 デバッグ ===');
+  console.log('');
+
+  // ---- 設定値 ----
+  console.log('【設定】');
+  console.log('  AREA_CODE        : ' + CONFIG.AREA_CODE);
+  console.log('  TEMP_STATION_CODE: ' + CONFIG.TEMP_STATION_CODE);
+  console.log('  今日の日付 (JST) : ' + getTodayDateJst());
+  console.log('');
+
+  // ---- JSON 取得 ----
+  var data;
+  try {
+    data = fetchWeatherJson(CONFIG.AREA_CODE);
+  } catch (e) {
+    console.error('気象庁 JSON の取得に失敗: ' + e.message);
+    console.log('=== デバッグ 終了 ===');
+    return;
+  }
+
+  var shortForecast = data[0];
+  var weeklyForecast = data[1] || null;
+
+  if (!shortForecast || !Array.isArray(shortForecast.timeSeries)) {
+    console.error('短期予報の timeSeries が取得できませんでした。');
+    console.log('=== デバッグ 終了 ===');
+    return;
+  }
+
+  var timeSeries = shortForecast.timeSeries;
+
+  console.log('【発表情報】');
+  console.log('  発表時刻  : ' + (shortForecast.reportDatetime || '不明'));
+  console.log('  発表官署  : ' + (shortForecast.publishingOffice || '不明'));
+  console.log('  timeSeries数: ' + timeSeries.length);
+  console.log('');
+
+  // ---- 各 timeSeries の詳細 ----
+  console.log('【各 timeSeries の詳細】');
+  var todayDate = getTodayDateJst();
+
+  for (var si = 0; si < timeSeries.length; si++) {
+    var ts = timeSeries[si];
+    console.log('--- timeSeries[' + si + '] ---');
+
+    // timeDefines
+    var tdList = (ts.timeDefines && Array.isArray(ts.timeDefines)) ? ts.timeDefines : [];
+    console.log('  timeDefines (' + tdList.length + '件):');
+    for (var tdi = 0; tdi < tdList.length; tdi++) {
+      var d = extractDateFromIso(tdList[tdi]);
+      var marker = (d === todayDate) ? ' ★今日' : '';
+      console.log('    [' + tdi + '] ' + tdList[tdi] + ' → ' + d + marker);
+    }
+
+    // areas
+    if (!ts.areas || !Array.isArray(ts.areas)) {
+      console.log('  areas: なし');
+      continue;
+    }
+
+    console.log('  areas (' + ts.areas.length + '件):');
+    for (var ai = 0; ai < ts.areas.length; ai++) {
+      var a = ts.areas[ai];
+      if (!a || !a.area) continue;
+
+      var fields = [];
+      if (a.weatherCodes) fields.push('weatherCodes[' + a.weatherCodes.length + ']');
+      if (a.weathers) fields.push('weathers[' + a.weathers.length + ']');
+      if (a.winds) fields.push('winds[' + a.winds.length + ']');
+      if (a.pops) fields.push('pops[' + a.pops.length + ']');
+      if (a.temps) fields.push('temps[' + a.temps.length + ']');
+
+      var isTarget = (a.area.code === CONFIG.TEMP_STATION_CODE);
+      var prefix = isTarget ? '  ▶' : '   ';
+      console.log(prefix + ' code=' + a.area.code + ' name=' + a.area.name + ' fields=(' + fields.join(', ') + ')');
+
+      // TEMP_STATION_CODE に一致する area のデータを詳細表示
+      if (isTarget && a.temps) {
+        console.log('    ★★★ TEMP_STATION_CODE 発見 ★★★');
+        console.log('    temps 生データ: [' + a.temps.join(', ') + ']');
+        console.log('    timeDefines との対応:');
+        for (var ti = 0; ti < tdList.length && ti < a.temps.length; ti++) {
+          var dd = extractDateFromIso(tdList[ti]);
+          var mm = (dd === todayDate) ? ' ★今日のデータ' : '';
+          console.log('      [' + ti + '] ' + tdList[ti] + ' → ' + a.temps[ti] + '℃' + mm);
+        }
+      }
+    }
+  }
+
+  // ---- extractTemperaturesFromSeries で抽出 ----
+  console.log('');
+  console.log('【extractTemperaturesFromSeries の実行結果】');
+  var result = extractTemperaturesFromSeries(timeSeries);
+  console.log('  maxTemp: ' + (result.maxTemp !== null ? result.maxTemp + '℃' : 'null'));
+  console.log('  minTemp: ' + (result.minTemp !== null ? result.minTemp + '℃' : 'null'));
+
+  // ---- 週間予報の確認 ----
+  if (weeklyForecast && weeklyForecast.timeSeries) {
+    console.log('');
+    console.log('【週間予報の気温データ（フォールバック候補）】');
+    var weeklyResult = extractTempsFromWeekly(weeklyForecast.timeSeries);
+    console.log('  maxTemp: ' + (weeklyResult.maxTemp !== null ? weeklyResult.maxTemp + '℃' : 'null'));
+    console.log('  minTemp: ' + (weeklyResult.minTemp !== null ? weeklyResult.minTemp + '℃' : 'null'));
+  }
+
+  // ---- 気温スナップショットの確認 ----
+  console.log('');
+  console.log('【気温スナップショット（日付キー: WEATHER_TEMP_SNAPSHOT_' + getTodayDateJst() + '）】');
+  var tempSnapshot = loadTempSnapshot();
+  if (tempSnapshot) {
+    console.log('  日付    : ' + (tempSnapshot.date || '不明'));
+    console.log('  maxTemp : ' + (tempSnapshot.maxTemp !== null ? tempSnapshot.maxTemp + '℃' : 'null'));
+    console.log('  minTemp : ' + (tempSnapshot.minTemp !== null ? tempSnapshot.minTemp + '℃' : 'null'));
+    console.log('  保存時刻: ' + (tempSnapshot.savedAt || '不明'));
+    console.log('  → フォールバックとして使用可能です。');
+  } else {
+    console.log('  今日の気温スナップショットはまだ保存されていません。');
+  }
+
+  // ---- 参考: 天気スナップショットの気温（念のため） ----
+  console.log('');
+  console.log('【参考: 天気スナップショット内の気温】');
+  var weatherSnap = loadWeatherSnapshot();
+  if (weatherSnap) {
+    console.log('  日付    : ' + (weatherSnap.date || '不明'));
+    console.log('  maxTemp : ' + (weatherSnap.maxTemp !== null ? weatherSnap.maxTemp + '℃' : 'null'));
+    console.log('  minTemp : ' + (weatherSnap.minTemp !== null ? weatherSnap.minTemp + '℃' : 'null'));
+  } else {
+    console.log('  天気スナップショットはまだ保存されていません。');
+  }
+
+  // ---- 総合判定（buildWeatherInfo と同じロジックを再現） ----
+  console.log('');
+  console.log('【総合判定（buildWeatherInfo と同じロジック）】');
+
+  // A. JSONから取得
+  var finalMax = result.maxTemp;
+  var finalMin = result.minTemp;
+
+  // B. 週間予報から補完
+  if (weeklyForecast && weeklyForecast.timeSeries && (finalMax === null || finalMin === null)) {
+    var wkt = extractTempsFromWeekly(weeklyForecast.timeSeries);
+    if (finalMax === null) finalMax = wkt.maxTemp;
+    if (finalMin === null) finalMin = wkt.minTemp;
+  }
+
+  // C. 気温スナップショットから補完
+  if ((finalMax === null || finalMin === null) && tempSnapshot) {
+    if (finalMax === null && tempSnapshot.maxTemp !== null) finalMax = tempSnapshot.maxTemp;
+    if (finalMin === null && tempSnapshot.minTemp !== null) finalMin = tempSnapshot.minTemp;
+  }
+
+  console.log('  最終 maxTemp: ' + (finalMax !== null ? finalMax + '℃' : 'null'));
+  console.log('  最終 minTemp: ' + (finalMin !== null ? finalMin + '℃' : 'null'));
+
+  if (finalMax !== null && finalMin !== null) {
+    console.log('');
+    console.log('  表示例: 気温：最高 ' + finalMax + '℃ / 最低 ' + finalMin + '℃');
+  } else if (finalMax !== null) {
+    console.log('');
+    console.log('  表示例: 気温：最高 ' + finalMax + '℃');
+  } else if (finalMin !== null) {
+    console.log('');
+    console.log('  表示例: 気温：最低 ' + finalMin + '℃');
+  } else {
+    console.log('');
+    console.log('  → 気温データが取得できません。投稿文に気温行は表示されません。');
+    console.log('  → 考えられる原因:');
+    console.log('    1. TEMP_STATION_CODE (' + CONFIG.TEMP_STATION_CODE + ') が誤っている');
+    console.log('    2. 気象庁JSONの構造が変更された');
+    console.log('    3. 今日の気温データが JSON になく、気温スナップショットも未保存');
+    console.log('  → 対処:');
+    console.log('    a. area.json で正しい class20s コードを確認する');
+    console.log('    b. 朝6時台または11時台に testPost を実行し気温スナップショットを保存する');
+    console.log('    c. その後、再度 testPost または debugTemperature を実行する');
+  }
+
+  console.log('');
+  console.log('=== 気温データ取得状況 デバッグ 終了 ===');
 }
 
 
@@ -459,6 +858,12 @@ function formatReportLine(reportDatetime, publishingOffice) {
  * JSON 構造の詳細な説明はコード内コメントと README.md を参照。
  * 気象庁 JSON の仕様変更に備え、各項目の存在チェックを丁寧に行います。
  *
+ * 気温データの取得優先順位:
+ *   A. 気象庁JSON から今日の日付の最高・最低気温を取得できた場合 → その値を使う
+ *   B. JSONに今日の気温がない場合 → 同じ日付の気温スナップショットから補完
+ *      （朝6時台や11時台に取得して Script Properties に保存された値）
+ *   C. どちらにもない場合 → 気温行を省略（null）
+ *
  * @param {Array} data - fetchWeatherJson() で取得した JSON データ
  * @return {Object} 抽出された天気情報
  */
@@ -488,17 +893,76 @@ function buildWeatherInfo(data) {
   // --- 降水確率（timeSeries[1]）---
   var pops = extractPrecipitationProb(timeSeries[1]);
 
-  // --- 気温（timeSeries[2]）---
-  var temps = extractTemperatures(timeSeries[2]);
+  // --- 気温（timeSeries から temps を持つ系列を動的に検索）---
+  // timeSeries[2] 固定ではなく、全 timeSeries の中から
+  // TEMP_STATION_CODE に一致する area が temps を持つ系列を探します。
+  // 気象庁 JSON の timeSeries 構成は発表時刻によって変わることがあるため、
+  // インデックス固定にせず動的検索します。
+  var jsonTemps = extractTemperaturesFromSeries(timeSeries);
+  var temps = {
+    maxTemp: jsonTemps.maxTemp,
+    minTemp: jsonTemps.minTemp
+  };
+  var tempSourceMax = 'none'; // 'json' | 'weekly' | 'snapshot' | 'none'
+  var tempSourceMin = 'none';
+  if (temps.maxTemp !== null) tempSourceMax = 'json';
+  if (temps.minTemp !== null) tempSourceMin = 'json';
+
+  console.log(
+    '気温取得 優先順位A（JSON）: maxTemp=' + (temps.maxTemp !== null ? temps.maxTemp + '℃' : 'null') +
+    ', minTemp=' + (temps.minTemp !== null ? temps.minTemp + '℃' : 'null')
+  );
 
   // --- 週間予報から補足（短期予報で不足する場合のフォールバック）---
   if (weeklyForecast && weeklyForecast.timeSeries) {
-    // 気温が取得できなかった場合、週間予報から補完を試みる
     if (temps.maxTemp === null || temps.minTemp === null) {
       var weeklyTemps = extractTempsFromWeekly(weeklyForecast.timeSeries);
-      if (temps.maxTemp === null) temps.maxTemp = weeklyTemps.maxTemp;
-      if (temps.minTemp === null) temps.minTemp = weeklyTemps.minTemp;
+      if (temps.maxTemp === null && weeklyTemps.maxTemp !== null) {
+        temps.maxTemp = weeklyTemps.maxTemp;
+        tempSourceMax = 'weekly';
+      }
+      if (temps.minTemp === null && weeklyTemps.minTemp !== null) {
+        temps.minTemp = weeklyTemps.minTemp;
+        tempSourceMin = 'weekly';
+      }
     }
+  }
+
+  console.log(
+    '気温取得 優先順位B（週間予報）: maxTemp=' + (temps.maxTemp !== null ? temps.maxTemp + '℃' : 'null') +
+    ', minTemp=' + (temps.minTemp !== null ? temps.minTemp + '℃' : 'null')
+  );
+
+  // --- 気温スナップショットから補完（夕方の17時発表では今日の気温データが含まれないため）---
+  // 17時発表の JSON では timeSeries から今日の日付が除外されることがあります。
+  // その場合、同日中の別の発表（6時台や11時台）で取得・保存した気温データで補完します。
+  // 翌日の気温は今日の投稿には使いません（日付が一致するものだけ使用）。
+  if (temps.maxTemp === null || temps.minTemp === null) {
+    var savedTemps = loadTempSnapshot();
+    if (savedTemps) {
+      if (temps.maxTemp === null && savedTemps.maxTemp !== null) {
+        temps.maxTemp = savedTemps.maxTemp;
+        tempSourceMax = 'snapshot';
+        console.log('  → スナップショットから最高気温を補完: ' + savedTemps.maxTemp + '℃');
+      }
+      if (temps.minTemp === null && savedTemps.minTemp !== null) {
+        temps.minTemp = savedTemps.minTemp;
+        tempSourceMin = 'snapshot';
+        console.log('  → スナップショットから最低気温を補完: ' + savedTemps.minTemp + '℃');
+      }
+    } else {
+      console.log('  → 今日の気温スナップショットがなく、補完できませんでした');
+    }
+  }
+
+  console.log(
+    '気温取得 優先順位C（スナップショット）: maxTemp=' + (temps.maxTemp !== null ? temps.maxTemp + '℃' : 'null') +
+    ', minTemp=' + (temps.minTemp !== null ? temps.minTemp + '℃' : 'null')
+  );
+
+  // 今日の気温が取得できた場合、後の発表のためにスナップショットを保存
+  if (temps.maxTemp !== null || temps.minTemp !== null) {
+    saveTempSnapshot(temps.maxTemp, temps.minTemp);
   }
 
   // --- 服装の目安 ---
@@ -512,6 +976,20 @@ function buildWeatherInfo(data) {
 
   // --- 雨のピーク情報 ---
   var rainPeakResult = getRainPeakInfo(pops, weatherWind.weatherRaw);
+
+  // --- 気温取得の最終サマリー ---
+  console.log('');
+  console.log('===== 気温取得サマリー =====');
+  console.log('  発表時刻: ' + formatReportDatetime(shortForecast.reportDatetime || '不明'));
+  console.log('  最高気温: ' + (temps.maxTemp !== null ? temps.maxTemp + '℃' : 'null') +
+    '（取得元: ' + tempSourceMax + '）');
+  console.log('  最低気温: ' + (temps.minTemp !== null ? temps.minTemp + '℃' : 'null') +
+    '（取得元: ' + tempSourceMin + '）');
+  if (temps.maxTemp === null && temps.minTemp === null) {
+    console.log('  → 投稿文の気温行は省略されます（理由: JSON・週間予報・スナップショットのいずれからも取得不可）');
+  }
+  console.log('===========================');
+  console.log('');
 
   // --- 結果をまとめる ---
   return {
@@ -639,11 +1117,78 @@ function extractPrecipitationProb(ts) {
 
 
 /**
- * timeSeries[2] から今日の最高・最低気温を抽出します。
+ * 全 timeSeries の中から、temps データを持つ系列を探して気温を抽出します。
+ * インデックス固定ではなく、TEMP_STATION_CODE に一致する area と
+ * temps フィールドの両方を持つ系列を動的に検索します。
  *
- * timeSeries[2] の構造:
- *   timeDefines: [今日09:00, 今日00:00, 明日00:00, 明日09:00]
- *   areas: [{ area: {name, code}, temps: [4個] }]
+ * 気象庁 JSON の timeSeries 構成は発表時刻によって異なることがあり、
+ * timeSeries[2] に気温が入っているとは限らないため、この関数で吸収します。
+ *
+ * @param {Array} timeSeries - shortForecast.timeSeries
+ * @return {Object} {maxTemp: number|null, minTemp: number|null, seriesIndex: number}
+ */
+function extractTemperaturesFromSeries(timeSeries) {
+  console.log(
+    'timeSeries の構成（全 ' + timeSeries.length + ' 件）:'
+  );
+
+  // 各 timeSeries の内容をログに出力
+  for (var si = 0; si < timeSeries.length; si++) {
+    var ts = timeSeries[si];
+    var areaCodes = [];
+    if (ts.areas && Array.isArray(ts.areas)) {
+      for (var ai = 0; ai < ts.areas.length; ai++) {
+        var a = ts.areas[ai];
+        if (a && a.area) {
+          var hasTemps = (a.temps && Array.isArray(a.temps));
+          var hasPops = (a.pops && Array.isArray(a.pops));
+          var hasWeatherCodes = (a.weatherCodes && Array.isArray(a.weatherCodes));
+          var fields = [];
+          if (hasTemps) fields.push('temps');
+          if (hasPops) fields.push('pops');
+          if (hasWeatherCodes) fields.push('weatherCodes');
+          areaCodes.push(a.area.code + '(' + a.area.name + ')[' + fields.join(',') + ']');
+        }
+      }
+    }
+    var tdCount = (ts.timeDefines && Array.isArray(ts.timeDefines)) ? ts.timeDefines.length : 0;
+    console.log('  timeSeries[' + si + ']: timeDefines数=' + tdCount + ', areas=' + areaCodes.join(' '));
+  }
+
+  // TEMP_STATION_CODE に一致し temps を持つ系列を探す
+  for (var si2 = 0; si2 < timeSeries.length; si2++) {
+    var ts2 = timeSeries[si2];
+    if (!ts2.areas || !Array.isArray(ts2.areas)) continue;
+
+    for (var ai2 = 0; ai2 < ts2.areas.length; ai2++) {
+      var a2 = ts2.areas[ai2];
+      if (a2 && a2.area && a2.area.code === CONFIG.TEMP_STATION_CODE && a2.temps) {
+        console.log('気温データを timeSeries[' + si2 + '] から抽出します（地点: ' + a2.area.name + '）');
+        return extractTemperatures(ts2);
+      }
+    }
+  }
+
+  // 見つからなかった場合、timeSeries[2] をフォールバックとして試行（後方互換）
+  if (timeSeries.length >= 3) {
+    console.warn(
+      'TEMP_STATION_CODE (' + CONFIG.TEMP_STATION_CODE + ') に一致する temps エリアが' +
+      'どの timeSeries にも見つかりませんでした。timeSeries[2] をフォールバックとして試行します。'
+    );
+    return extractTemperatures(timeSeries[2]);
+  }
+
+  console.warn('気温データを含む timeSeries が見つかりませんでした。');
+  return { maxTemp: null, minTemp: null };
+}
+
+
+/**
+ * 指定された timeSeries エントリから今日の最高・最低気温を抽出します。
+ *
+ * 構造:
+ *   timeDefines: [今日09:00, 今日00:00, 明日00:00, 明日09:00] など
+ *   areas: [{ area: {name, code}, temps: [...] }]
  *
  * 慣例として、同一日付の中で:
  *   - 09:00 の timeDefine → 最高気温
@@ -654,7 +1199,7 @@ function extractPrecipitationProb(ts) {
  * 片方だけでもあればそれを返し、なければ両方 null とします。
  * 他日のデータをフォールバックとして使うことはしません（誤表示防止）。
  *
- * @param {Object} ts - timeSeries[2]
+ * @param {Object} ts - 気温データを含む timeSeries エントリ
  * @return {Object} {maxTemp: number|null, minTemp: number|null}
  */
 function extractTemperatures(ts) {
@@ -672,12 +1217,26 @@ function extractTemperatures(ts) {
   var temps = area.temps;
   var timeDefines = ts.timeDefines || [];
 
+  // ---- timeSeries[2] の全 timeDefines と温度をログ出力 ----
+  console.log(
+    '気温 timeSeries[2] の内容（観測地点: ' + CONFIG.TEMP_STATION_CODE + ', 検索日付: ' + todayDate + '）:'
+  );
+  for (var di = 0; di < timeDefines.length; di++) {
+    var d = extractDateFromIso(timeDefines[di]);
+    var v = (di < temps.length) ? temps[di] : '（添字範囲外）';
+    console.log('  [' + di + '] ' + timeDefines[di] + ' → 日付=' + d + ' 値=' + v);
+  }
+
   var maxTemp = null;
   var minTemp = null;
   var todayMaxCandidates = [];
   var todayMinCandidates = [];
 
   // 今日の日付のデータを収集
+  // 時刻ベースの判定:
+  //   T09: を含む → 最高気温候補
+  //   それ以外     → 最低気温候補
+  // 現在時刻（朝/昼/夕方）では判定しない——今日の日付であれば必ず使用する
   for (var i = 0; i < temps.length && i < timeDefines.length; i++) {
     var tempValue = parseFloat(temps[i]);
     if (isNaN(tempValue)) continue;
@@ -686,7 +1245,6 @@ function extractTemperatures(ts) {
     var dateStr = extractDateFromIso(timeStr);
 
     if (dateStr === todayDate) {
-      // 時刻から最高/最低を判断（09:00 含む → 最高、それ以外 → 最低）
       if (timeStr.indexOf('T09:') !== -1) {
         todayMaxCandidates.push(tempValue);
       } else {
@@ -705,13 +1263,21 @@ function extractTemperatures(ts) {
     minTemp = Math.min.apply(null, todayMinCandidates);
   }
 
-  // 今日の日付のデータが1つもない場合のログ
+  // ---- 気温取得結果のログ ----
+  console.log(
+    '気温抽出結果:' +
+    ' 最高候補=' + (todayMaxCandidates.length > 0 ? todayMaxCandidates.join(',') : 'なし') +
+    ' → maxTemp=' + (maxTemp !== null ? maxTemp + '℃' : 'null') +
+    ', 最低候補=' + (todayMinCandidates.length > 0 ? todayMinCandidates.join(',') : 'なし') +
+    ' → minTemp=' + (minTemp !== null ? minTemp + '℃' : 'null')
+  );
+
+  // 今日の日付のデータが1つもない場合の警告
+  // （夕方の17時発表では timeSeries[2] が明日以降の日付のみになることがある）
   if (todayMaxCandidates.length === 0 && todayMinCandidates.length === 0) {
     console.warn(
       '今日（' + todayDate + '）の気温データが timeSeries[2] に見つかりませんでした。' +
-      '利用可能な日付: ' + timeDefines.map(function(td) {
-        return extractDateFromIso(td);
-      }).join(', ')
+      '（17時発表のJSONでは今日の日付が含まれないことがあります）'
     );
   }
 
@@ -1265,20 +1831,25 @@ function formatDiscordMessage(info) {
   }
 
   // ---- 気温 ----
-  //   最高・最低の両方が取得できて値が異なる場合は「最高 X℃ / 最低 Y℃」、
-  //   両方取得できて値が同じ場合は「X℃前後」、
-  //   片方しか取得できなかった場合も「X℃前後」と表示し、
-  //   どちらも取得できなかった場合は行ごと省略します。
+  //   最高・最低の両方が取得できた場合は「最高 X℃ / 最低 Y℃」。
+  //   値が同じでも省略せず、そのまま表示します（例: 最高 25℃ / 最低 25℃）。
+  //   片方しか取得できなかった場合は、取得できた方だけ表示します。
+  //   どちらも取得できなかった場合のみ、行ごと省略します。
+  console.log('');
+  console.log('--- 投稿文 気温行の決定 ---');
+  console.log('  maxTemp=' + (info.maxTemp !== null ? info.maxTemp + '℃' : 'null') +
+    ', minTemp=' + (info.minTemp !== null ? info.minTemp + '℃' : 'null'));
   if (info.maxTemp !== null && info.minTemp !== null) {
-    if (info.maxTemp !== info.minTemp) {
-      lines.push('気温：最高 ' + info.maxTemp + '℃ / 最低 ' + info.minTemp + '℃');
-    } else {
-      lines.push('気温：' + info.maxTemp + '℃前後');
-    }
+    lines.push('気温：最高 ' + info.maxTemp + '℃ / 最低 ' + info.minTemp + '℃');
+    console.log('  → 表示: 最高 ' + info.maxTemp + '℃ / 最低 ' + info.minTemp + '℃');
   } else if (info.maxTemp !== null) {
-    lines.push('気温：' + info.maxTemp + '℃前後');
+    lines.push('気温：最高 ' + info.maxTemp + '℃');
+    console.log('  → 表示: 最高 ' + info.maxTemp + '℃（最低気温が取得できなかったため）');
   } else if (info.minTemp !== null) {
-    lines.push('気温：' + info.minTemp + '℃前後');
+    lines.push('気温：最低 ' + info.minTemp + '℃');
+    console.log('  → 表示: 最低 ' + info.minTemp + '℃（最高気温が取得できなかったため）');
+  } else {
+    console.log('  → 気温行を省略しました（理由: JSON・週間予報・スナップショットのいずれからも気温を取得できなかったため）');
   }
 
   // ---- 風 ----
@@ -1360,16 +1931,25 @@ function formatUpdateMessage(info, changes) {
   }
 
   // ---- 気温 ----
+  //   最高・最低の両方が取得できた場合は「最高 X℃ / 最低 Y℃」。
+  //   値が同じでも省略せず、そのまま表示します。
+  //   片方しか取得できなかった場合は、取得できた方だけ表示します。
+  //   どちらも取得できなかった場合のみ、行ごと省略します。
+  console.log('');
+  console.log('--- 更新通知 気温行の決定 ---');
+  console.log('  maxTemp=' + (info.maxTemp !== null ? info.maxTemp + '℃' : 'null') +
+    ', minTemp=' + (info.minTemp !== null ? info.minTemp + '℃' : 'null'));
   if (info.maxTemp !== null && info.minTemp !== null) {
-    if (info.maxTemp !== info.minTemp) {
-      lines.push('気温：最高 ' + info.maxTemp + '℃ / 最低 ' + info.minTemp + '℃');
-    } else {
-      lines.push('気温：' + info.maxTemp + '℃前後');
-    }
+    lines.push('気温：最高 ' + info.maxTemp + '℃ / 最低 ' + info.minTemp + '℃');
+    console.log('  → 表示: 最高 ' + info.maxTemp + '℃ / 最低 ' + info.minTemp + '℃');
   } else if (info.maxTemp !== null) {
-    lines.push('気温：' + info.maxTemp + '℃前後');
+    lines.push('気温：最高 ' + info.maxTemp + '℃');
+    console.log('  → 表示: 最高 ' + info.maxTemp + '℃（最低気温が取得できなかったため）');
   } else if (info.minTemp !== null) {
-    lines.push('気温：' + info.minTemp + '℃前後');
+    lines.push('気温：最低 ' + info.minTemp + '℃');
+    console.log('  → 表示: 最低 ' + info.minTemp + '℃（最高気温が取得できなかったため）');
+  } else {
+    console.log('  → 気温行を省略しました（理由: JSON・週間予報・スナップショットのいずれからも気温を取得できなかったため）');
   }
 
   // ---- 風 ----
@@ -1395,16 +1975,17 @@ function checkUpdate() {
     console.log('=== 天気予報 更新確認 開始 ===');
 
     var webhookUrl = getWebhookUrl();
-    var data = fetchWeatherJson(CONFIG.AREA_CODE);
-    var newInfo = buildWeatherInfo(data);
     var snapshot = loadWeatherSnapshot();
 
     if (!snapshot) {
-      console.log('前回の天気データがありません。スナップショットを保存して終了します。');
-      saveWeatherSnapshot(newInfo);
+      console.log('前回の天気データがありません。終了します。');
       console.log('=== 天気予報 更新確認 完了 ===');
       return;
     }
+
+    var data = fetchWeatherJson(CONFIG.AREA_CODE);
+    // 気温のフォールバックは buildWeatherInfo 内で自動処理（loadTempSnapshot 経由）
+    var newInfo = buildWeatherInfo(data);
 
     // 発表時刻が前回と同じならスキップ（新しい予報がまだ出ていない）
     if (snapshot.reportDatetime === newInfo.reportDatetime) {
@@ -1630,6 +2211,11 @@ function saveWeatherSnapshot(info) {
 
   props.setProperty('WEATHER_SNAPSHOT', JSON.stringify(snapshot));
   console.log('天気スナップショットを保存しました（' + formatReportDatetime(info.reportDatetime) + '）');
+
+  // 気温スナップショットも同時に保存（日付キーで後から参照可能にする）
+  if (info.maxTemp !== null || info.minTemp !== null) {
+    saveTempSnapshot(info.maxTemp, info.minTemp);
+  }
 }
 
 /**
@@ -1651,6 +2237,79 @@ function loadWeatherSnapshot() {
     return snapshot;
   } catch (e) {
     console.warn('天気スナップショットのパースに失敗しました: ' + e.message);
+    return null;
+  }
+}
+
+
+// ============================================================================
+// 気温スナップショット管理（日付キー。夕方の投稿向けの気温補完用）
+// ============================================================================
+
+/**
+ * 今日の日付をキーにして最高・最低気温をスクリプトプロパティに保存します。
+ *
+ * 17時発表のJSONでは今日の日付の気温データが含まれないことがあるため、
+ * 同日中の先の発表（6時台・11時台）で取得した気温を保存しておき、
+ * 後の発表で JSON から気温が取得できなかった場合に補完します。
+ *
+ * 保存キー: WEATHER_TEMP_SNAPSHOT_YYYY-MM-DD
+ * 日付が変わるとキーも変わるため、昨日の気温が今日に使われることはありません。
+ *
+ * @param {number|null} maxTemp - 最高気温
+ * @param {number|null} minTemp - 最低気温
+ */
+function saveTempSnapshot(maxTemp, minTemp) {
+  var todayDate = getTodayDateJst();
+  var key = 'WEATHER_TEMP_SNAPSHOT_' + todayDate;
+
+  var data = {
+    date: todayDate,
+    maxTemp: maxTemp,
+    minTemp: minTemp,
+    savedAt: new Date().toISOString()
+  };
+
+  PropertiesService.getScriptProperties().setProperty(key, JSON.stringify(data));
+  console.log(
+    '気温スナップショットを保存しました（キー: ' + key + '）:' +
+    ' 日付=' + todayDate +
+    ' 最高=' + (maxTemp !== null ? maxTemp + '℃' : 'null') +
+    ' 最低=' + (minTemp !== null ? minTemp + '℃' : 'null')
+  );
+  console.log('  → 保存データ: ' + JSON.stringify(data));
+  console.log('  → このデータは、後の発表（11時・17時）でJSONに今日の気温がない場合の補完に使われます');
+}
+
+/**
+ * 今日の日付に対応する気温スナップショットをスクリプトプロパティから読み込みます。
+ *
+ * 朝6時台や11時台に取得・保存された今日の気温データを返します。
+ * 今日の気温が JSON から取得できなかった場合のフォールバックとして使用します。
+ *
+ * @return {Object|null} {date, maxTemp, minTemp, savedAt}。未保存の場合は null
+ */
+function loadTempSnapshot() {
+  var todayDate = getTodayDateJst();
+  var key = 'WEATHER_TEMP_SNAPSHOT_' + todayDate;
+  var json = PropertiesService.getScriptProperties().getProperty(key);
+
+  if (!json || json === '') {
+    console.log('今日の気温スナップショットはありません（キー: ' + key + '）');
+    return null;
+  }
+
+  try {
+    var data = JSON.parse(json);
+    console.log(
+      '気温スナップショットを読み込みました（キー: ' + key + '）:' +
+      ' 最高=' + (data.maxTemp !== null ? data.maxTemp + '℃' : 'null') +
+      ' 最低=' + (data.minTemp !== null ? data.minTemp + '℃' : 'null') +
+      '（保存時刻: ' + (data.savedAt || '不明') + '）'
+    );
+    return data;
+  } catch (e) {
+    console.warn('気温スナップショットのパースに失敗しました（キー: ' + key + '）: ' + e.message);
     return null;
   }
 }
@@ -1680,6 +2339,7 @@ function testUpdateCheck() {
   try {
     getWebhookUrl(); // URLが設定されているか確認のみ（投稿はしない）
     var data = fetchWeatherJson(CONFIG.AREA_CODE);
+    // 気温のフォールバックは buildWeatherInfo 内で自動処理
     var newInfo = buildWeatherInfo(data);
     var snapshot = loadWeatherSnapshot();
 
