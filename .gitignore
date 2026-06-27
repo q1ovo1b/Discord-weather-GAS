@@ -1,0 +1,21 @@
+# 環境変数ファイル（秘密情報を含む）
+.env
+
+# シークレット設定ファイル（秘密情報を含む）
+secrets.*
+
+# ローカル専用ファイル
+*.local
+
+# Node.js（clasp を併用する場合）
+node_modules/
+
+# clasp 認証情報（OAuth トークンを含むため絶対にコミットしない）
+.clasprc.json
+creds.json
+
+# OS 生成ファイル
+.DS_Store
+Thumbs.db
+
+.claude/
