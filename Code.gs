@@ -162,6 +162,7 @@ var WEATHER_CODE_MAP = {
 function main() {
   try {
     console.log('=== 天気予報 Discord 通知（通常投稿）開始 ===');
+    console.log('実行モード: 通常投稿（朝6時台）');
 
     // 1. Webhook URL を取得
     var webhookUrl = getWebhookUrl();
@@ -169,17 +170,18 @@ function main() {
     // 2. 気象庁 JSON を取得
     var data = fetchWeatherJson(CONFIG.AREA_CODE);
 
-    // 3. 天気情報を抽出（気温のフォールバックは buildWeatherInfo 内で自動処理）
+    // 3. 天気情報を抽出（気温スナップショット保存は buildWeatherInfo 内で自動処理）
     var weatherInfo = buildWeatherInfo(data);
 
     // 4. Discord 投稿文を作成
     var message = formatDiscordMessage(weatherInfo);
 
-    // 5. Discord に投稿
+    // 5. Discord に投稿（通常投稿は常に行う）
     postToDiscord(webhookUrl, message);
+    console.log('  → Discord に通常投稿しました');
 
     // 6. スナップショットを保存（11時・17時の更新確認用）
-    //    buildWeatherInfo 内で気温スナップショットも自動保存される
+    //    buildWeatherInfo 内で気温スナップショットも自動保存済み
     saveWeatherSnapshot(weatherInfo);
 
     console.log('=== 天気予報 Discord 通知（通常投稿）完了 ===');
@@ -1972,51 +1974,102 @@ function formatUpdateMessage(info, changes) {
  */
 function checkUpdate() {
   try {
+    var now = new Date();
+    var currentHour = Utilities.formatDate(now, 'Asia/Tokyo', 'H');
     console.log('=== 天気予報 更新確認 開始 ===');
+    console.log('実行モード: 更新チェック（' + currentHour + '時台）');
+    console.log('');
 
     var webhookUrl = getWebhookUrl();
+
+    // ---- Step 1: JSON取得と天気情報の組み立て ----
+    var data = fetchWeatherJson(CONFIG.AREA_CODE);
+    // 気温スナップショットの補完／保存は buildWeatherInfo 内で自動処理
+    var newInfo = buildWeatherInfo(data);
+
+    // ---- Step 2: 今日の気温データの保存状況をログ ----
+    // buildWeatherInfo 内ですでに saveTempSnapshot が呼ばれているが、
+    // ここで明示的にログを出して保存状況を可視化する
+    console.log('');
+    console.log('--- 気温スナップショット保存状況 ---');
+    var savedTemps = loadTempSnapshot();
+    if (savedTemps) {
+      console.log(
+        '  保存済み気温スナップショット:' +
+        ' 最高=' + (savedTemps.maxTemp !== null ? savedTemps.maxTemp + '℃' : 'null') +
+        ' 最低=' + (savedTemps.minTemp !== null ? savedTemps.minTemp + '℃' : 'null') +
+        '（保存時刻: ' + (savedTemps.savedAt || '不明') + '）'
+      );
+    } else {
+      console.log('  気温スナップショットはまだ保存されていません');
+    }
+
+    // ---- Step 3: 前回スナップショットの読み込み ----
     var snapshot = loadWeatherSnapshot();
 
     if (!snapshot) {
-      console.log('前回の天気データがありません。終了します。');
+      console.log('');
+      console.log('前回の天気データ（比較用スナップショット）がありません。');
+      console.log('比較用スナップショットを保存して終了します。');
+      console.log('（気温スナップショットは buildWeatherInfo 内で保存済みです）');
+      saveWeatherSnapshot(newInfo);
+      console.log('');
       console.log('=== 天気予報 更新確認 完了 ===');
       return;
     }
 
-    var data = fetchWeatherJson(CONFIG.AREA_CODE);
-    // 気温のフォールバックは buildWeatherInfo 内で自動処理（loadTempSnapshot 経由）
-    var newInfo = buildWeatherInfo(data);
-
-    // 発表時刻が前回と同じならスキップ（新しい予報がまだ出ていない）
+    // ---- Step 4: 発表時刻が前回と同じならスキップ ----
     if (snapshot.reportDatetime === newInfo.reportDatetime) {
-      console.log('発表時刻が前回と同じです（' + formatReportDatetime(newInfo.reportDatetime) + '）。更新なし。');
+      console.log('');
+      console.log('発表時刻が前回と同じです（' + formatReportDatetime(newInfo.reportDatetime) + '）。');
+      console.log('新しい予報はまだ出ていません。');
+      console.log('（気温スナップショットは buildWeatherInfo 内で保存済みです）');
+      console.log('');
       console.log('=== 天気予報 更新確認 完了 ===');
       return;
     }
 
+    console.log('');
     console.log('新たな発表を検出: ' + formatReportDatetime(newInfo.reportDatetime));
 
-    // 日付が変わっていたら朝の通常投稿に任せる
+    // ---- Step 5: 日付チェック ----
     var todayDate = getTodayDateJst();
     if (snapshot.date !== todayDate) {
-      console.log('日付が変わっています（' + snapshot.date + ' → ' + todayDate + '）。更新確認をスキップします。');
+      console.log('日付が変わっています（' + snapshot.date + ' → ' + todayDate + '）。');
+      console.log('更新確認をスキップします（朝の通常投稿に任せます）。');
+      console.log('比較用スナップショットを更新します。');
       saveWeatherSnapshot(newInfo);
+      console.log('');
       console.log('=== 天気予報 更新確認 完了 ===');
       return;
     }
 
+    // ---- Step 6: 変化検出と投稿判定 ----
     var changes = detectSignificantChanges(snapshot, newInfo);
 
+    console.log('');
+    console.log('--- 変化検出結果 ---');
+    console.log('  検出された変化の数: ' + changes.length);
     if (changes.length > 0) {
-      console.log('大きな変化を検出しました（' + changes.length + '件）: ' + changes.join(', '));
+      for (var ci = 0; ci < changes.length; ci++) {
+        console.log('    ' + (ci + 1) + '. ' + changes[ci]);
+      }
+    }
+
+    if (changes.length > 0) {
+      console.log('');
+      console.log('→ 大きな変化あり。Discord に更新通知を投稿します。');
       var message = formatUpdateMessage(newInfo, changes);
       postToDiscord(webhookUrl, message);
       saveWeatherSnapshot(newInfo);
-      console.log('更新通知を投稿しました');
+      console.log('  更新通知を投稿しました');
     } else {
-      console.log('大きな変化はありませんでした。投稿をスキップします。');
+      console.log('');
+      console.log('→ 大きな変化はありません。Discord への投稿をスキップします。');
+      console.log('  （気温スナップショットは buildWeatherInfo 内で保存済みです）');
     }
 
+    console.log('');
     console.log('=== 天気予報 更新確認 完了 ===');
   } catch (e) {
     console.error('【エラー】checkUpdate() で例外が発生しました');
