@@ -73,11 +73,21 @@ var CONFIG = {
   // ---- トリガー時刻設定 ---------------------------------------------------
   // 通常投稿の時間（毎日この時間台に実行されます）
   MORNING_TRIGGER_HOUR: 6,
+  MORNING_TRIGGER_MINUTE: 45,
 
   // 更新確認の時間（気象庁の11時発表・17時発表に対応）
   //   これらの時間台に checkUpdate() が呼ばれ、前回投稿から
   //   大きな変化があった場合のみ Discord に追加通知します
   UPDATE_CHECK_HOURS: [11, 17],
+  UPDATE_CHECK_MINUTE: 15,
+
+  // 時間主導トリガーのタイムゾーン
+  TRIGGER_TIMEZONE: 'Asia/Tokyo',
+
+  // Discord のレート制限時は、10〜20分後に1回だけ再投稿する
+  DISCORD_RETRY_MIN_MINUTES: 10,
+  DISCORD_RETRY_MAX_MINUTES: 20,
+  DISCORD_MAX_RETRY_COUNT: 1,
 
   // ---- 変更検出のしきい値 ------------------------------------------------
   // 降水確率の最大値がこの値以上変わったら「大きな変化」とみなす
@@ -177,8 +187,12 @@ function main() {
     var message = formatDiscordMessage(weatherInfo);
 
     // 5. Discord に投稿（通常投稿は常に行う）
-    postToDiscord(webhookUrl, message);
-    console.log('  → Discord に通常投稿しました');
+    var posted = postToDiscord(webhookUrl, message);
+    if (posted) {
+      console.log('  → Discord に通常投稿しました');
+    } else {
+      console.log('  → Discord rate limit のため再投稿予約済みです');
+    }
 
     // 6. スナップショットを保存（11時・17時の更新確認用）
     //    buildWeatherInfo 内で気温スナップショットも自動保存済み
@@ -623,9 +637,9 @@ function debugTemperature() {
  * 初回セットアップ時に手動で実行してください。
  *
  * 作成されるトリガー:
- *   1. main():       毎日 6:00〜7:00  → 通常投稿
- *   2. checkUpdate(): 毎日 11:00〜12:00 → 11時発表の更新確認（変化時のみ投稿）
- *   3. checkUpdate(): 毎日 17:00〜18:00 → 17時発表の更新確認（変化時のみ投稿）
+ *   1. main():        毎日 6:30〜7:00ごろ  → 通常投稿
+ *   2. checkUpdate(): 毎日 11:00〜11:30ごろ → 11時発表の更新確認（変化時のみ投稿）
+ *   3. checkUpdate(): 毎日 17:00〜17:30ごろ → 17時発表の更新確認（変化時のみ投稿）
  *
  * 既存のトリガーはすべて削除してから作り直します（重複防止）。
  * GAS の仕様上、実行時刻はおおよその目安で、日によって前後します。
@@ -639,20 +653,24 @@ function setupTrigger() {
   // 1. 毎朝の通常投稿トリガー
   ScriptApp.newTrigger('main')
     .timeBased()
-    .everyDays(1)
     .atHour(CONFIG.MORNING_TRIGGER_HOUR)
+    .nearMinute(CONFIG.MORNING_TRIGGER_MINUTE)
+    .everyDays(1)
+    .inTimezone(CONFIG.TRIGGER_TIMEZONE)
     .create();
-  console.log('  作成: main() — 毎日 ' + CONFIG.MORNING_TRIGGER_HOUR + ':00〜' + (CONFIG.MORNING_TRIGGER_HOUR + 1) + ':00（通常投稿）');
+  console.log('  作成: main() — 毎日 6:30〜7:00ごろ（通常投稿）');
 
   // 2. 11時台・17時台の更新確認トリガー
   for (var i = 0; i < CONFIG.UPDATE_CHECK_HOURS.length; i++) {
     var hour = CONFIG.UPDATE_CHECK_HOURS[i];
     ScriptApp.newTrigger('checkUpdate')
       .timeBased()
-      .everyDays(1)
       .atHour(hour)
+      .nearMinute(CONFIG.UPDATE_CHECK_MINUTE)
+      .everyDays(1)
+      .inTimezone(CONFIG.TRIGGER_TIMEZONE)
       .create();
-    console.log('  作成: checkUpdate() — 毎日 ' + hour + ':00〜' + (hour + 1) + ':00（更新確認）');
+    console.log('  作成: checkUpdate() — 毎日 ' + hour + ':00〜' + hour + ':30ごろ（更新確認）');
   }
 
   console.log('');
@@ -2060,9 +2078,13 @@ function checkUpdate() {
       console.log('');
       console.log('→ 大きな変化あり。Discord に更新通知を投稿します。');
       var message = formatUpdateMessage(newInfo, changes);
-      postToDiscord(webhookUrl, message);
+      var posted = postToDiscord(webhookUrl, message);
       saveWeatherSnapshot(newInfo);
-      console.log('  更新通知を投稿しました');
+      if (posted) {
+        console.log('  更新通知を投稿しました');
+      } else {
+        console.log('  Discord rate limit のため再投稿予約済みです');
+      }
     } else {
       console.log('');
       console.log('→ 大きな変化はありません。Discord への投稿をスキップします。');
@@ -2474,8 +2496,10 @@ function testUpdateCheck() {
  *
  * @param {string} webhookUrl - Discord Webhook URL
  * @param {string} message - 投稿するメッセージ本文
+ * @param {boolean=} isRetry - 一回限りの再投稿から呼ばれた場合は true
+ * @return {boolean} 投稿成功時は true、レート制限で保留した場合は false
  */
-function postToDiscord(webhookUrl, message) {
+function postToDiscord(webhookUrl, message, isRetry) {
   console.log('Discord に投稿中...');
 
   var payload = {
@@ -2499,11 +2523,118 @@ function postToDiscord(webhookUrl, message) {
     console.log('Discord 投稿成功 (HTTP ' + statusCode + ')');
   } else {
     var body = response.getContentText();
+    if (isDiscordRateLimitResponse(statusCode, body)) {
+      Logger.log('Discord rate limit (HTTP ' + statusCode + ')');
+
+      if (isRetry) {
+        Logger.log('Discord rate limit: 再投稿でも失敗したため、これ以上は再試行しません');
+      } else {
+        reservePendingDiscordPost(message);
+        Logger.log('Discord rate limit: 再投稿予約済み');
+      }
+      return false;
+    }
+
     throw new Error(
       'Discord 投稿に失敗しました。\n' +
       '  ステータスコード: ' + statusCode + '\n' +
       '  レスポンス: ' + body.slice(0, 500)
     );
+  }
+
+  return true;
+}
+
+/**
+ * Discord または手前の Cloudflare によるレート制限レスポンスか判定します。
+ *
+ * @param {number} statusCode - HTTP ステータスコード
+ * @param {string} body - レスポンス本文
+ * @return {boolean} 429 または Cloudflare error code 1015 なら true
+ */
+function isDiscordRateLimitResponse(statusCode, body) {
+  return statusCode === 429 || /(?:error\s*code\s*:?\s*|error\s+)1015\b/i.test(body || '');
+}
+
+/**
+ * 投稿本文を Script Properties に保存し、10〜20分後の一回限りの
+ * 再投稿トリガーを作成します。
+ *
+ * @param {string} message - 投稿予定だったメッセージ本文
+ */
+function reservePendingDiscordPost(message) {
+  var props = PropertiesService.getScriptProperties();
+  props.setProperties({
+    PENDING_DISCORD_MESSAGE: message,
+    PENDING_DISCORD_SAVED_AT: new Date().toISOString(),
+    PENDING_DISCORD_RETRY_COUNT: '0'
+  });
+
+  // 同じ保留投稿に対する再投稿トリガーが重複しないようにする
+  deleteTriggersByHandler('retryPendingDiscordPost');
+
+  var minMinutes = CONFIG.DISCORD_RETRY_MIN_MINUTES;
+  var maxMinutes = CONFIG.DISCORD_RETRY_MAX_MINUTES;
+  var delayMinutes = Math.floor(Math.random() * (maxMinutes - minMinutes + 1)) + minMinutes;
+
+  ScriptApp.newTrigger('retryPendingDiscordPost')
+    .timeBased()
+    .after(delayMinutes * 60 * 1000)
+    .create();
+
+  Logger.log('再投稿予約済み: 約' + delayMinutes + '分後に実行します');
+}
+
+/**
+ * Script Properties に保留した Discord 投稿を一度だけ再実行します。
+ * 再度レート制限された場合は無限再試行せず、保留データを残して終了します。
+ */
+function retryPendingDiscordPost() {
+  var props = PropertiesService.getScriptProperties();
+  var message = props.getProperty('PENDING_DISCORD_MESSAGE');
+
+  if (!message) {
+    Logger.log('保留中の Discord 投稿はありません');
+    return;
+  }
+
+  var retryCount = parseInt(props.getProperty('PENDING_DISCORD_RETRY_COUNT') || '0', 10);
+  if (retryCount >= CONFIG.DISCORD_MAX_RETRY_COUNT) {
+    Logger.log('Discord 再投稿の上限（' + CONFIG.DISCORD_MAX_RETRY_COUNT + '回）に達しているため終了します');
+    return;
+  }
+
+  // 実行開始前に加算し、途中で例外になっても再試行回数を超えないようにする
+  props.setProperty('PENDING_DISCORD_RETRY_COUNT', String(retryCount + 1));
+  Logger.log('Discord 保留投稿を再実行します（' + (retryCount + 1) + '/' + CONFIG.DISCORD_MAX_RETRY_COUNT + '回）');
+
+  try {
+    var posted = postToDiscord(getWebhookUrl(), message, true);
+    if (posted) {
+      props.deleteProperty('PENDING_DISCORD_MESSAGE');
+      props.deleteProperty('PENDING_DISCORD_SAVED_AT');
+      props.deleteProperty('PENDING_DISCORD_RETRY_COUNT');
+      Logger.log('Discord 再投稿に成功し、保留データを削除しました');
+    }
+  } catch (e) {
+    console.error('【エラー】retryPendingDiscordPost() で例外が発生しました');
+    console.error('  message: ' + e.message);
+    console.error('  stack: ' + e.stack);
+    throw e;
+  }
+}
+
+/**
+ * 指定したハンドラー関数のトリガーだけを削除します。
+ *
+ * @param {string} handlerFunction - トリガーのハンドラー関数名
+ */
+function deleteTriggersByHandler(handlerFunction) {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === handlerFunction) {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
   }
 }
 
