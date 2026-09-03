@@ -1805,6 +1805,34 @@ function getWindLevel(windText) {
 // ============================================================================
 
 /**
+ * 天気テキストに含まれる主要な天気を、出現順のアイコン列に変換します。
+ * @param {string} weatherText - 天気テキスト
+ * @return {string} アイコン列（例: "☀️ → ☁️"）。判定できない場合は空文字列
+ */
+function getWeatherIconSequence(weatherText) {
+  if (!weatherText || typeof weatherText !== 'string') return '';
+
+  var iconMap = {
+    '晴れ': '☀️',
+    'くもり': '☁️',
+    '曇り': '☁️',
+    '雨': '☔',
+    '雪': '❄️'
+  };
+  var matches = weatherText.match(/晴れ|くもり|曇り|雨|雪/g) || [];
+  var icons = [];
+
+  for (var i = 0; i < matches.length; i++) {
+    var icon = iconMap[matches[i]];
+    if (icons.length === 0 || icons[icons.length - 1] !== icon) {
+      icons.push(icon);
+    }
+  }
+
+  return icons.join(' → ');
+}
+
+/**
  * 抽出した天気情報から Discord 投稿用のメッセージ本文を作成します。
  *
  * 投稿文はできるだけ短く、見やすくします。
@@ -1823,12 +1851,10 @@ function formatDiscordMessage(info) {
   lines.push(dateStr + '（' + dayOfWeek + '）の天気');
   lines.push('');
 
-  // ---- 地域 ----
-  lines.push('地域：' + (info.regionName || CONFIG.REGION_NAME));
-
   // ---- 天気 ----
   if (info.weatherText) {
-    lines.push('天気：' + info.weatherText);
+    var weatherIcons = getWeatherIconSequence(info.weatherText);
+    lines.push('天気：' + info.weatherText + (weatherIcons ? '（' + weatherIcons + '）' : ''));
   }
 
   // ---- 降水確率 ----
@@ -1920,19 +1946,10 @@ function formatUpdateMessage(info, changes) {
   lines.push('## 天気予報の更新');
   lines.push('');
 
-  // ---- 地域 ----
-  lines.push('地域：' + (info.regionName || CONFIG.REGION_NAME));
-
-  // ---- 変更点 ----
-  if (changes.length > 0) {
-    lines.push('変更点：' + changes.join('。') + '。');
-  }
-
-  lines.push('');
-
   // ---- 天気 ----
   if (info.weatherText) {
-    lines.push('天気：' + info.weatherText);
+    var weatherIcons = getWeatherIconSequence(info.weatherText);
+    lines.push('天気：' + info.weatherText + (weatherIcons ? '（' + weatherIcons + '）' : ''));
   }
 
   // ---- 降水確率 ----
@@ -1975,6 +1992,12 @@ function formatUpdateMessage(info, changes) {
   // ---- 風 ----
   if (info.windText && info.windText !== '') {
     lines.push('風：' + info.windText);
+  }
+
+  // ---- 変更点 ----
+  if (changes.length > 0) {
+    lines.push('');
+    lines.push('変更点：' + changes.join('。') + '。');
   }
 
   return lines.join('\n');
